@@ -43,24 +43,21 @@ const input = $input.first();
 const headers = input.json.headers || {};
 let raw = null;
 try { raw = await this.helpers.getBinaryDataBuffer(0, 'data'); } catch (_) {}
-if (env.SKIP_SIGNATURE_CHECK !== 'true') {
-  if (!raw || !core.verifySignature(raw, headers['x-hub-signature-256'], env.META_APP_SECRET, crypto)) {
-    log([new Date().toISOString(), 'rejected', '', '', '', '', '', '', '', '', '', '', 'bad_signature', '', '', '', '', '', '', raw ? 'signature mismatch' : 'no raw body']);
-    return [];
-  }
+if (!raw || !core.verifySignature(raw, headers['x-hub-signature-256'], env.META_APP_SECRET, crypto)) {
+  log([new Date().toISOString(), 'rejected', '', '', '', '', '', '', '', '', '', '', 'bad_signature', '', '', '', '', '', '', raw ? 'signature mismatch' : 'no raw body']);
+  return [];
 }
 let body = input.json.body;
 if (raw) { try { body = JSON.parse(raw.toString('utf8')); } catch (_) {} }
 
-const mode = ['off', 'dry_run', 'live'].includes(env.AUTOREPLY_MODE) ? env.AUTOREPLY_MODE : 'dry_run';
+const mode = core.parseMode(env.AUTOREPLY_MODE);
 if (mode === 'off') return [];
 
 const sd = $getWorkflowStaticData('global');
 sd.seen = core.pruneSeen(sd.seen || {}, Date.now());
-const testIds = (env.TEST_ONLY_USER_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const opts = {
   accounts: core.loadAccounts(env), copy: COPY, mode, seen: sd.seen, now: new Date(),
-  testOnlyUserIds: testIds.length ? new Set(testIds) : null,
+  testOnlyUserIds: core.parseTestIds(env.TEST_ONLY_USER_IDS),
 };
 
 const out = [];
@@ -72,27 +69,59 @@ for (const ev of core.parseEvents(body)) {
 }
 return out;`;
 
-const actCode = `// GENERATED from src/act.js + src/core.js by scripts/build-workflow.js. Edit those, then rebuild.
+const actCode = `// GENERATED from src/act.js + src/core.js + copy.json by scripts/build-workflow.js. Edit those, then rebuild.
 const fs = require('fs');
+const path = require('path');
 const core = ${CORE};
 const { act } = ${ACT};
+const COPY_APPROVED = ${JSON.stringify(copy.approved === true)};
 
 const env = $env;
 const LOG = env.LOG_CSV_PATH || '/home/node/.n8n/logs/autoreply-log.csv';
-const http = (o) => this.helpers.httpRequest({ method: o.method, url: o.url, qs: o.qs, body: o.body, json: true });
+const CLAIMS = env.CLAIM_DIR || '/home/node/.n8n/claims';
+const http = (o) => this.helpers.httpRequest({ method: o.method, url: o.url, qs: o.qs, body: o.body, headers: o.headers, json: true });
+fs.mkdirSync(path.dirname(LOG), { recursive: true });
+fs.mkdirSync(CLAIMS, { recursive: true });
+const writeLog = (fields) => {
+  if (!fs.existsSync(LOG)) fs.appendFileSync(LOG, core.csvRow(core.LOG_COLUMNS));
+  fs.appendFileSync(LOG, core.csvRow(fields));
+};
+
+// Drop claims older than Meta's 7-day private-reply window (+1 day).
+const cutoff = Date.now() - 8 * 24 * 3600 * 1000;
+for (const f of fs.readdirSync(CLAIMS)) {
+  try { if (fs.statSync(path.join(CLAIMS, f)).mtimeMs < cutoff) fs.unlinkSync(path.join(CLAIMS, f)); } catch (_) {}
+}
 
 const results = [];
 for (const it of $input.all()) {
-  const d = it.json;
+  const d = { ...it.json };
+  // Re-check the gate NOW, with the current switch and test list: the item may
+  // have waited 30-90 s, and the switch may have been turned off meanwhile.
+  const g = core.gateMode(d.fromId, {
+    mode: core.parseMode(env.AUTOREPLY_MODE), copy: { approved: COPY_APPROVED },
+    testOnlyUserIds: core.parseTestIds(env.TEST_ONLY_USER_IDS),
+  });
+  if (d.mode === 'live' && g.mode !== 'live') { d.mode = g.mode; d.note = 're-gated before send: ' + (g.note || g.mode); }
+
+  // Durable, atomic claim: exactly one live attempt per comment, even across
+  // concurrent executions and restarts ('wx' fails if the file already exists).
+  if (d.mode === 'live') {
+    try {
+      fs.writeFileSync(path.join(CLAIMS, String(d.commentId).replace(/[^A-Za-z0-9_-]/g, '_')), new Date().toISOString(), { flag: 'wx' });
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      d.mode = 'duplicate'; d.note = 'already claimed by another execution';
+    }
+  }
+
   const token = env[d.brand.toUpperCase() + '_PAGE_TOKEN'];
   const r = await act(d, { http, env, token });
-  fs.mkdirSync(require('path').dirname(LOG), { recursive: true });
-  if (!fs.existsSync(LOG)) fs.appendFileSync(LOG, core.csvRow(core.LOG_COLUMNS));
-  fs.appendFileSync(LOG, core.csvRow([
+  writeLog([
     new Date().toISOString(), d.mode, d.brand, d.platform, d.accountId, d.postId, d.commentId, d.parentId,
     d.fromId, d.fromName, d.fromUsername, d.text, d.action, d.variant, d.dmText, r.dm_status,
     d.publicText, r.public_status, r.alert_status, d.note,
-  ]));
+  ]);
   results.push({ json: { ...d, ...r } });
 }
 return results;`;

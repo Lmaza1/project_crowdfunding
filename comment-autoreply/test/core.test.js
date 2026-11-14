@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const core = require('../src/core');
-const { act, parseWhatsApp } = require('../src/act');
+const { act, parseWhatsApp, redact } = require('../src/act');
 const copy = require('../copy.json');
 
 const ENV = {
@@ -91,7 +91,11 @@ test('complaints -> recovery DM, no public reply', () => {
     assert.strictEqual(d.publicText, null);
     assert.match(d.dmText, /^Lamentamos tu experiencia, María/);
   }
-  for (const text of ['Qué bonito quedó 😍', 'Precio?', 'me encanta, la peor parte fue decidir el color jaja'.replace('la peor', 'lo difícil')]) {
+  for (const text of ['No me entregaron el trabajo', 'Me cobraron de más', 'dejaron la obra a medias']) {
+    assert.ok(core.isNegative(text), text);
+  }
+  for (const text of ['Qué bonito quedó 😍', 'Precio?', 'No tengo ninguna queja, excelente trabajo',
+    'Tengo una filtración en el techo, ¿la reparan?', 'Se me rajó la pared, cotizan?', 'lo peor fue decidir el color jaja']) {
     assert.ok(!core.isNegative(text), text);
   }
 });
@@ -132,18 +136,19 @@ test('act live FB: DM to /page/messages first, then /comment/comments', async ()
   const { calls, http } = recorder();
   const r = await act(d, { http, env: {}, token: 'tokC' });
   assert.deepStrictEqual(r, { dm_status: 'sent', public_status: 'sent', alert_status: '' });
-  assert.strictEqual(calls[0].url, 'https://graph.facebook.com/v21.0/111/messages');
+  assert.strictEqual(calls[0].url, 'https://graph.facebook.com/v24.0/111/messages');
   assert.deepStrictEqual(calls[0].body.recipient, { comment_id: '111_999' });
-  assert.strictEqual(calls[1].url, 'https://graph.facebook.com/v21.0/111_999/comments');
-  assert.strictEqual(calls[1].qs.access_token, 'tokC');
+  assert.strictEqual(calls[1].url, 'https://graph.facebook.com/v24.0/111_999/comments');
+  assert.strictEqual(calls[1].headers.Authorization, 'Bearer tokC');
+  assert.ok(!calls.some((c) => JSON.stringify(c.qs || {}).includes('tokC')), 'token never in the URL');
 });
 
 test('act live IG: public reply uses /replies; DM failure skips public + alerts', async () => {
   const d = core.decide(core.parseEvents(igBody())[0], { accounts, copy: approved, mode: 'live', seen: {} });
   const ok = recorder();
   await act(d, { http: ok.http, env: {}, token: 'tokV' });
-  assert.strictEqual(ok.calls[0].url, 'https://graph.facebook.com/v21.0/222/messages');
-  assert.strictEqual(ok.calls[1].url, 'https://graph.facebook.com/v21.0/17900/replies');
+  assert.strictEqual(ok.calls[0].url, 'https://graph.facebook.com/v24.0/222/messages');
+  assert.strictEqual(ok.calls[1].url, 'https://graph.facebook.com/v24.0/17900/replies');
   const bad = recorder('/messages');
   const r = await act(d, { http: bad.http, env: { ALERT_WEBHOOK_URL: 'https://hooks.example/x' }, token: 'tokV' });
   assert.match(r.dm_status, /graph error 10/);
@@ -151,14 +156,46 @@ test('act live IG: public reply uses /replies; DM failure skips public + alerts'
   assert.strictEqual(r.alert_status, 'webhook sent');
 });
 
-test('act dry_run never calls Graph; complaint alert still fires, marked [PRUEBA]', async () => {
-  const d = core.decide(core.parseEvents(fbBody({ message: 'son una estafa' }))[0], { accounts, copy, mode: 'live', seen: {} });
-  const { calls, http } = recorder();
-  const r = await act(d, { http, env: { ALERT_WEBHOOK_URL: 'https://hooks.example/x' }, token: 'tokC' });
-  assert.strictEqual(r.dm_status, 'dry_run');
-  assert.strictEqual(calls.length, 1);
-  assert.strictEqual(calls[0].url, 'https://hooks.example/x');
-  assert.match(calls[0].body.text, /^\[PRUEBA\] Comentario negativo/);
+test('audit #1: dry_run makes ZERO outbound calls, alerts included', async () => {
+  const env = { ALERT_WEBHOOK_URL: 'https://hooks.example/x', ALERT_WHATSAPP: '50212345678:111' };
+  for (const message of ['son una estafa', 'precio?']) {
+    const d = core.decide(core.parseEvents(fbBody({ message }))[0], { accounts, copy, mode: 'live', seen: {} });
+    assert.strictEqual(d.mode, 'dry_run');
+    const { calls, http } = recorder();
+    const r = await act(d, { http, env, token: 'tokC' });
+    assert.strictEqual(calls.length, 0, message);
+    assert.strictEqual(r.dm_status, 'dry_run');
+  }
+});
+
+test('audit #4: errors are redacted before logging', async () => {
+  assert.strictEqual(redact('GET https://x/?phone=1&apikey=999&access_token=EAAB123 failed', []), 'GET https://x/?phone=1&apikey=[redacted]&access_token=[redacted] failed');
+  assert.strictEqual(redact('boom EAABsecret boom', ['EAABsecret']), 'boom [redacted] boom');
+  const d = core.decide(core.parseEvents(fbBody())[0], { accounts, copy: approved, mode: 'live', seen: {} });
+  const http = async () => { throw new Error('connect failed https://graph.facebook.com/x?access_token=tokC'); };
+  const r = await act(d, { http, env: {}, token: 'tokC', sleep: async () => {} });
+  assert.ok(!r.dm_status.includes('tokC'), r.dm_status);
+});
+
+test('transient errors are retried, permanent ones are not', async () => {
+  const d = core.decide(core.parseEvents(fbBody())[0], { accounts, copy: approved, mode: 'live', seen: {} });
+  let n = 0;
+  const flaky = async () => { if (++n === 1) { const e = new Error('x'); e.response = { body: { error: { code: 2, message: 'temporary' } } }; throw e; } return {}; };
+  const r = await act(d, { http: flaky, env: {}, token: 't', sleep: async () => {} });
+  assert.strictEqual(r.dm_status, 'sent');
+  const bad = recorder('/messages');
+  await act(d, { http: bad.http, env: {}, token: 't', sleep: async () => {} });
+  assert.strictEqual(bad.calls.length, 1, 'code 10 is permanent: no retry');
+});
+
+test('audit #5: DM ok but public reply failed -> alert', async () => {
+  const d = core.decide(core.parseEvents(igBody())[0], { accounts, copy: approved, mode: 'live', seen: {} });
+  const { calls, http } = recorder('/replies');
+  const r = await act(d, { http, env: { ALERT_WHATSAPP: '50212345678:111' }, token: 'tokV' });
+  assert.strictEqual(r.dm_status, 'sent');
+  assert.match(r.public_status, /^error/);
+  assert.strictEqual(r.alert_status, 'wa:5678 sent');
+  assert.match(calls.at(-1).qs.text, /^DM enviado, pero falló la respuesta pública/);
 });
 
 test('VcM DM greeting follows time of day', () => {
@@ -183,6 +220,7 @@ test('WhatsApp alerts via CallMeBot to every recipient', async () => {
 
 test('csv escaping', () => {
   assert.strictEqual(core.csvRow(['a', 'b,c', 'd"e', null, 'x\ny']), 'a,"b,c","d""e",,"x\ny"\n');
+  assert.strictEqual(core.csvRow(['=HYPERLINK("http://x")', '+1', '@a', '-2']), '"\'=HYPERLINK(""http://x"")",\'+1,\'@a,\'-2\n');
 });
 
 // Runs the generated n8n Code nodes from workflow.json in a fake n8n runtime.
@@ -219,6 +257,22 @@ test('workflow.json Code nodes run end-to-end in a simulated n8n runtime', async
   const lines = fs.readFileSync(logFile, 'utf8').trim().split('\n');
   assert.strictEqual(lines.length, 2);
   assert.match(lines[1], /dry_run,construr3,facebook,111/);
+
+  // audit #2 + #3: live item re-gated at send time, and one durable claim per comment
+  const liveAct = code('DM, public reply, alert, log').replace('const COPY_APPROVED = false;', 'const COPY_APPROVED = true;');
+  assert.notStrictEqual(liveAct, code('DM, public reply, alert, log'));
+  const claimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-'));
+  const liveItem = [{ json: { ...routed[0].json, mode: 'live', note: null } }];
+  const offCtx = { ...ctx, env: { ...env, AUTOREPLY_MODE: 'off', CLAIM_DIR: claimDir } };
+  const off = await run(liveAct, offCtx, liveItem);
+  assert.strictEqual(off[0].json.mode, 'off', 'switch turned off during the wait -> nothing sent');
+  const narrowed = await run(liveAct, { ...ctx, env: { ...env, TEST_ONLY_USER_IDS: '123', CLAIM_DIR: claimDir } }, liveItem);
+  assert.strictEqual(narrowed[0].json.mode, 'dry_run');
+  assert.strictEqual(calls.length, 0);
+  const liveCtx = { ...ctx, env: { ...env, CLAIM_DIR: claimDir } };
+  const [first, second] = await Promise.all([run(liveAct, liveCtx, liveItem), run(liveAct, liveCtx, liveItem)]);
+  assert.deepStrictEqual([first[0].json.mode, second[0].json.mode].sort(), ['duplicate', 'live']);
+  assert.strictEqual(calls.filter((c) => c.url.endsWith('/messages')).length, 1, 'exactly one DM');
 
   const forged = await run(code('Verify, filter, pick copy'), { ...ctx, static: {} }, [{ json: { headers: { 'x-hub-signature-256': 'sha256=00' }, body: {} } }]);
   assert.strictEqual(forged.length, 0);

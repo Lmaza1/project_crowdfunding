@@ -9,7 +9,7 @@ Self-hosted n8n workflow on the Mac Studio. For every new comment on the two Fac
 5. for complaints it sends only the service-recovery DM, posts nothing public and alerts Luis/Felix by WhatsApp,
 6. logs every comment to `n8n-data/logs/autoreply-log.csv`.
 
-> **Nothing goes live until Luis approves the copy.** `copy.json` has `"approved": false`. While it does, even `AUTOREPLY_MODE=live` runs as dry-run: everything is logged, nothing is sent to Meta.
+> **Nothing goes live until Luis approves the copy.** `copy.json` has `"approved": false`. While it does, even `AUTOREPLY_MODE=live` runs as dry-run. Dry-run makes **no outbound call of any kind** (no Meta, no WhatsApp, no alert webhook): it only writes to the local CSV log.
 
 ## Files
 
@@ -21,11 +21,11 @@ Self-hosted n8n workflow on the Mac Studio. For every new comment on the two Fac
 | `workflow.json` | **Generated** n8n workflow (import this). Rebuild with `npm run build` after editing anything above |
 | `docker-compose.yml`, `.env.example` | n8n + Cloudflare Tunnel |
 | `scripts/simulate-comment.sh` | Sends a signed fake comment to the local n8n |
-| `test/` | `npm test`: 18 tests, including the generated n8n code run in a simulated n8n runtime |
+| `test/` | `npm test`: 21 tests, including the generated n8n code run in a simulated n8n runtime |
 
 ## Install on the Mac Studio (Claude / ChatGPT does this part)
 
-1. **Docker Desktop** installed and running. Copy this folder to the Mac (e.g. `~/comment-autoreply`), then `cp .env.example .env && chmod 600 .env`.
+1. **Docker Desktop** installed and running, and **Node.js 18+** (`node -v`) for the build, tests and simulator (`brew install node` if missing). Run `npm test` once on the Mac: it must show 21 passing. Copy this folder to the Mac (e.g. `~/comment-autoreply`), then `cp .env.example .env && chmod 600 .env`.
 2. **Public HTTPS URL (Cloudflare named tunnel, free).** Meta needs a stable URL, so don't use a quick `trycloudflare.com` tunnel: its address changes on every restart. We use **vasconmaz.com**: add it to a free Cloudflare account and switch its nameservers to Cloudflare at the registrar. The website and email keep working as long as the existing DNS records are imported (Cloudflare does this on setup; check the MX records).
    Cloudflare Zero Trust → Networks → Tunnels → Create tunnel (cloudflared) → copy the token into `CLOUDFLARE_TUNNEL_TOKEN`. Add a public hostname `hooks.vasconmaz.com` → service `http://n8n:5678`, **path `webhook/.*`**, so only the webhooks are public and the n8n editor is not. Put the hostname in `PUBLIC_HOSTNAME`.
 3. `docker compose up -d`, open http://localhost:5678 on the Mac, create the owner account with a strong password.
@@ -61,7 +61,7 @@ D. **Webhooks:** in the app → Webhooks: object **Page** → callback `https://
 E. **Instagram setting**, on each IG account in the app: Settings → Messages and story replies → Message controls → Connected tools → **Allow access to messages** on. Without it, IG DMs fail.
 
 F. **Business Verification + App Review (Advanced Access)** for the permissions above. Record the screencasts with the workflow in dry-run plus one live test on a test comment. This is the slow step.
-> Worth checking first: Meta sometimes lets an app read and reply on assets owned by the app's own business with *Standard* Access in Live mode. Before starting review, switch the app to Live, comment from a personal account, and see whether the webhook arrives. If it does, review may be unnecessary. If not, go through review as planned.
+> Worth checking first: Meta sometimes lets an app read and reply on assets owned by the app's own business with *Standard* Access in Live mode. The test only counts if the commenter has **no role on the app** (not admin, developer or tester), because Meta always serves people with app roles. Ask someone outside the app (a friend's account) to comment, and confirm both the webhook and the live DM + public reply reach them. If they do, review may be unnecessary. If not, go through review as planned.
 
 ## Go-live checklist (Muse verifies)
 
@@ -76,8 +76,14 @@ F. **Business Verification + App Review (Advanced Access)** for the permissions 
 - **Names:** Facebook gives the commenter's name, so `{nombre}` becomes the first name ("María José López" → "María"). Instagram only gives a @username, and greeting people by handle reads like a bot, so on IG the name is dropped cleanly ("¡Gracias, {nombre}!" → "¡Gracias!"). Tests cover every template both ways.
 - `{saludo}` gives Buenos días (5–12 h) / Buenas tardes (12–19 h) / Buenas noches, Guatemala time.
 - **Loops:** the brand's own replies come back as comment webhooks. They are recognised by account ID and skipped.
-- **Failed DM** (user blocks messages, comment older than 7 days, etc.): no public reply, because it would promise a message that never arrives. Luis/Felix get an alert to answer by hand.
-- **Dedupe** is kept in n8n's workflow memory for 8 days. Meta retries only when we don't answer 200, and the webhook answers immediately, so duplicates are rare in practice.
+- **Re-check before sending:** the on/off switch, the test list and the approval are checked again right before each send, after the 30–90 s wait. Turning `AUTOREPLY_MODE` off stops even comments that were already waiting.
+- **One reply per comment:** a lock file per comment (`n8n-data/claims/`, created atomically) means two simultaneous deliveries of the same comment can't both send. Locks expire after 8 days.
+- **Temporary errors** (network, Meta 5xx, rate limits) are retried twice (after 2 s and 6 s). If it still fails, the comment stays locked and a person is alerted. It is never retried automatically later, so nobody gets a duplicate DM.
+- **Failed DM** (user blocks messages, comment older than 7 days, etc.): no public reply, because it would promise a message that never arrives. Luis/Felix get a WhatsApp alert to answer by hand. A DM that worked followed by a failed public reply also alerts.
+- **Secrets:** the Meta token goes in an `Authorization` header, never in the URL, and tokens/keys are scrubbed from every logged or alerted error.
+- **CSV safety:** comment text starting with `=`, `+`, `-` or `@` is prefixed with `'`, so opening the log in Excel/Sheets can't run it as a formula.
+- **Not covered:** Instagram **Live** comments (a separate Meta field, `live_comments`, which isn't subscribed) and Facebook comments on Live videos beyond normal feed comments.
+- **Graph API version:** default `v24.0`. Meta retires each version about 2 years after release, so set `GRAPH_API_VERSION` to the newest version shown in the App Dashboard, and re-test when Meta announces a retirement.
 
 ## Copy decisions (2026-11-14)
 

@@ -82,10 +82,21 @@ const NEGATIVE_PATTERNS = [
   /\bincumpl/, /\bno (me )?cumpl/, /\bnunca (terminaron|llegaron|cumplieron|vinieron|contestaron|respondieron)/,
   /\bno (me )?(responden|contestan|han respondido|han contestado)/, /\bnadie (me )?(responde|contesta)/,
   /\bcuidado con\b/, /\bno (se los |lo |los )?recomiendo\b/, /\birresponsabl/, /\bsinverguenza/,
-  /\bratas?\b/, /\bchapuz/, /\bmal hech/, /\bse (cayo|rajo|agrieto|goteo)/, /\bfiltra(cion|ndo)/,
+  /\bratas?\b/, /\bchapuz/, /\bmal hech/, /\bmal trabajo\b/,
+  /\bno (me )?(entregaron|terminaron|cumplieron|devolvieron|regresaron|vinieron)/, /\bnunca (me )?entregaron/,
+  /\b(me|nos) (cobraron|cobran) (de mas|demas|mas de lo)/, /\bcobro de mas\b/, /\bsobrecobr/,
+  /\b(se|nos|me) (dejaron|dejo) (tirad|botad|abandonad|a medias)/, /\bobra (abandonada|a medias)\b/,
+  /\bdinero (perdido|tirado)\b/, /\bperd(i|imos) (mi|el|nuestro) dinero\b/,
+];
+// Phrases that contain a complaint word but aren't complaints ("ninguna queja").
+// Repair requests ("tengo una filtración") are deliberately NOT complaints: they're leads.
+const NEGATION_PATTERNS = [
+  /\b(ninguna|sin|cero|nada de) (queja|reclamo)s?\b/, /\bno (tengo|tenemos|hay) (ninguna |queja|quejas|reclamo)/,
+  /\b(lo|la) peor (es|fue) (decidir|elegir|esperar)/, /\bno (es|fue) (una )?estafa\b/,
 ];
 function isNegative(text) {
-  const t = normalize(text);
+  let t = normalize(text);
+  for (const re of NEGATION_PATTERNS) t = t.replace(new RegExp(re.source, 'g'), ' ');
   return NEGATIVE_PATTERNS.some((re) => re.test(t));
 }
 
@@ -125,6 +136,22 @@ function pickVariant(commentId, n) {
   return h % n;
 }
 
+// The single safety gate. 'live' only if the switch says live, the copy is
+// approved, and (when a test list is set) the commenter is on it.
+function gateMode(fromId, { mode, copy, testOnlyUserIds }) {
+  if (mode === 'off') return { mode: 'off', note: 'AUTOREPLY_MODE=off' };
+  if (mode !== 'live') return { mode: 'dry_run', note: null };
+  if (!copy || copy.approved !== true) return { mode: 'dry_run', note: 'copy not approved: forced dry_run' };
+  if (testOnlyUserIds && !testOnlyUserIds.has(fromId)) return { mode: 'dry_run', note: 'commenter not in TEST_ONLY_USER_IDS: dry_run' };
+  return { mode: 'live', note: null };
+}
+
+function parseMode(v) { return ['off', 'dry_run', 'live'].includes(v) ? v : 'dry_run'; }
+function parseTestIds(v) {
+  const ids = String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
+  return ids.length ? new Set(ids) : null;
+}
+
 // Decide what to do with one event. Returns null for events to ignore.
 // opts: { accounts, copy, mode: 'off'|'dry_run'|'live', seen: {commentId: ts}, now: Date, testOnlyUserIds: Set|null }
 function decide(event, opts) {
@@ -137,12 +164,7 @@ function decide(event, opts) {
   const vars = { nombre: firstName(event.fromName), saludo: saludo(opts.now || new Date()) };
   const negative = isNegative(event.text);
 
-  let mode = opts.mode;
-  let note = null;
-  if (mode === 'live' && !opts.copy.approved) { mode = 'dry_run'; note = 'copy not approved: forced dry_run'; }
-  if (mode === 'live' && opts.testOnlyUserIds && !opts.testOnlyUserIds.has(event.fromId)) {
-    mode = 'dry_run'; note = 'commenter not in TEST_ONLY_USER_IDS: dry_run';
-  }
+  const { mode, note } = gateMode(event.fromId, opts);
 
   const base = { ...event, brand: acct.brand, pageId: acct.pageId, mode, note };
   if (negative) {
@@ -167,7 +189,8 @@ function pruneSeen(seen, nowMs) {
 
 function csvRow(fields) {
   return fields.map((f) => {
-    const s = f === null || f === undefined ? '' : String(f);
+    let s = f === null || f === undefined ? '' : String(f);
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // stop spreadsheets running comment text as a formula
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }).join(',') + '\n';
 }
@@ -176,4 +199,4 @@ const LOG_COLUMNS = ['timestamp', 'mode', 'brand', 'platform', 'account_id', 'po
   'from_id', 'from_name', 'from_username', 'comment_text', 'action', 'variant', 'dm_text', 'dm_status',
   'public_text', 'public_status', 'alert_status', 'note'];
 
-module.exports = { BRANDS, verifySignature, loadAccounts, parseEvents, normalize, isNegative, firstName, saludo, render, pickVariant, decide, pruneSeen, csvRow, LOG_COLUMNS };
+module.exports = { BRANDS, verifySignature, loadAccounts, parseEvents, normalize, isNegative, firstName, saludo, render, pickVariant, gateMode, parseMode, parseTestIds, decide, pruneSeen, csvRow, LOG_COLUMNS };

@@ -18,6 +18,7 @@ services:
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false           # Code nodes read ids/tokens from .env
       - N8N_DIAGNOSTICS_ENABLED=false
       - LOG_CSV_PATH=/home/node/.n8n/logs/autoreply-log.csv
+      - CLAIM_DIR=/home/node/.n8n/claims
     volumes:
       - ./n8n-data:/home/node/.n8n
 

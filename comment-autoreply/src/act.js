@@ -56,7 +56,8 @@ async function act(item, ctx) {
 
   // 3) Human alert: every complaint, and any reply whose DM failed.
   const needsAlert = item.action === 'recovery' || (live && res.dm_status !== 'sent');
-  if (needsAlert && env.ALERT_WEBHOOK_URL) {
+  const whatsapp = parseWhatsApp(env.ALERT_WHATSAPP);
+  if (needsAlert && (env.ALERT_WEBHOOK_URL || whatsapp.length)) {
     let permalink = null;
     if (item.platform === 'instagram' && item.postId && token && live) {
       try { permalink = (await http({ method: 'GET', url: `${graph}/${item.postId}`, qs: { fields: 'permalink', access_token: token } })).permalink; } catch (_) {}
@@ -65,16 +66,37 @@ async function act(item, ctx) {
     const why = item.action === 'recovery' ? 'Comentario negativo' : 'No se pudo enviar el DM';
     const text = `${live ? '' : '[PRUEBA] '}${why} — ${item.brand} (${item.platform})\n` +
       `${who}: "${String(item.text).slice(0, 500)}"\n${commentLink(item, permalink)}\nDM: ${res.dm_status}`;
-    try {
-      await http({ method: 'POST', url: env.ALERT_WEBHOOK_URL, body: { text, content: text } });
-      res.alert_status = 'sent';
-    } catch (e) {
-      res.alert_status = 'error: ' + errText(e);
+    const statuses = [];
+    // WhatsApp via CallMeBot: one GET per recipient, each with their own apikey.
+    for (const r of whatsapp) {
+      try {
+        await http({ method: 'GET', url: 'https://api.callmebot.com/whatsapp.php', qs: { phone: r.phone, text, apikey: r.apikey } });
+        statuses.push(`wa:${r.phone.slice(-4)} sent`);
+      } catch (e) {
+        statuses.push(`wa:${r.phone.slice(-4)} error: ${errText(e)}`);
+      }
     }
+    if (env.ALERT_WEBHOOK_URL) {
+      try {
+        await http({ method: 'POST', url: env.ALERT_WEBHOOK_URL, body: { text, content: text } });
+        statuses.push('webhook sent');
+      } catch (e) {
+        statuses.push('webhook error: ' + errText(e));
+      }
+    }
+    res.alert_status = statuses.join('; ');
   } else if (needsAlert) {
-    res.alert_status = 'no ALERT_WEBHOOK_URL';
+    res.alert_status = 'no alert channel configured';
   }
   return res;
 }
 
-module.exports = { act, errText };
+// "50212345678:123456, +502 8765-4321:654321" -> [{phone:'50212345678', apikey:'123456'}, ...]
+function parseWhatsApp(s) {
+  return String(s || '').split(',').map((x) => x.trim()).filter(Boolean).map((x) => {
+    const i = x.lastIndexOf(':');
+    return { phone: x.slice(0, i).replace(/\D/g, ''), apikey: x.slice(i + 1).trim() };
+  }).filter((r) => r.phone && r.apikey);
+}
+
+module.exports = { act, errText, parseWhatsApp };

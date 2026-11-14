@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const core = require('../src/core');
-const { act } = require('../src/act');
+const { act, parseWhatsApp } = require('../src/act');
 const copy = require('../copy.json');
 
 const ENV = {
@@ -148,7 +148,7 @@ test('act live IG: public reply uses /replies; DM failure skips public + alerts'
   const r = await act(d, { http: bad.http, env: { ALERT_WEBHOOK_URL: 'https://hooks.example/x' }, token: 'tokV' });
   assert.match(r.dm_status, /graph error 10/);
   assert.strictEqual(r.public_status, 'skipped: dm failed');
-  assert.strictEqual(r.alert_status, 'sent');
+  assert.strictEqual(r.alert_status, 'webhook sent');
 });
 
 test('act dry_run never calls Graph; complaint alert still fires, marked [PRUEBA]', async () => {
@@ -159,6 +159,26 @@ test('act dry_run never calls Graph; complaint alert still fires, marked [PRUEBA
   assert.strictEqual(calls.length, 1);
   assert.strictEqual(calls[0].url, 'https://hooks.example/x');
   assert.match(calls[0].body.text, /^\[PRUEBA\] Comentario negativo/);
+});
+
+test('VcM DM greeting follows time of day', () => {
+  const ev = core.parseEvents(igBody())[0];
+  const at = (iso) => core.decide(ev, { accounts, copy: approved, mode: 'live', seen: {}, now: new Date(iso) }).dmText;
+  assert.match(at('2026-11-14T15:00:00Z'), /^Buenos días\. Le escribimos/);
+  assert.match(at('2026-11-15T03:00:00Z'), /^Buenas noches\. Le escribimos/);
+});
+
+test('WhatsApp alerts via CallMeBot to every recipient', async () => {
+  assert.deepStrictEqual(parseWhatsApp(' +502 1234-5678:111 , 50287654321:222,bad'), [
+    { phone: '50212345678', apikey: '111' }, { phone: '50287654321', apikey: '222' }]);
+  const d = core.decide(core.parseEvents(fbBody({ message: 'pésimo servicio' }))[0], { accounts, copy: approved, mode: 'live', seen: {} });
+  const { calls, http } = recorder();
+  const r = await act(d, { http, env: { ALERT_WHATSAPP: '50212345678:111,50287654321:222' }, token: 'tokC' });
+  const wa = calls.filter((c) => c.url === 'https://api.callmebot.com/whatsapp.php');
+  assert.strictEqual(wa.length, 2);
+  assert.deepStrictEqual(wa.map((c) => c.qs.apikey), ['111', '222']);
+  assert.match(wa[0].qs.text, /^Comentario negativo — construr3 \(facebook\)/);
+  assert.strictEqual(r.alert_status, 'wa:5678 sent; wa:4321 sent');
 });
 
 test('csv escaping', () => {

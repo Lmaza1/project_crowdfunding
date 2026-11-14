@@ -6,7 +6,7 @@ Self-hosted n8n workflow on the Mac Studio. For every new comment on the two Fac
 2. sorts complaints from everything else (Spanish keyword list in `src/core.js`, `NEGATIVE_PATTERNS`),
 3. waits a random 30–90 s,
 4. sends the **private-reply DM** first, then the **public reply** (rotating 3 variants per brand). The public reply says "te enviamos por mensaje", so it is only posted once the DM has gone out,
-5. for complaints it sends only the service-recovery DM, posts nothing public and alerts Luis/Felix,
+5. for complaints it sends only the service-recovery DM, posts nothing public and alerts Luis/Felix by WhatsApp,
 6. logs every comment to `n8n-data/logs/autoreply-log.csv`.
 
 > **Nothing goes live until Luis approves the copy.** `copy.json` has `"approved": false`. While it does, even `AUTOREPLY_MODE=live` runs as dry-run: everything is logged, nothing is sent to Meta.
@@ -21,21 +21,30 @@ Self-hosted n8n workflow on the Mac Studio. For every new comment on the two Fac
 | `workflow.json` | **Generated** n8n workflow (import this). Rebuild with `npm run build` after editing anything above |
 | `docker-compose.yml`, `.env.example` | n8n + Cloudflare Tunnel |
 | `scripts/simulate-comment.sh` | Sends a signed fake comment to the local n8n |
-| `test/` | `npm test`: 16 tests, including the generated n8n code run in a simulated n8n runtime |
+| `test/` | `npm test`: 18 tests, including the generated n8n code run in a simulated n8n runtime |
 
 ## Install on the Mac Studio (Claude / ChatGPT does this part)
 
 1. **Docker Desktop** installed and running. Copy this folder to the Mac (e.g. `~/comment-autoreply`), then `cp .env.example .env && chmod 600 .env`.
-2. **Public HTTPS URL (Cloudflare named tunnel, free).** Meta needs a stable URL, so don't use a quick `trycloudflare.com` tunnel: its address changes on every restart. You need a domain on Cloudflare DNS (e.g. move construr3.com's DNS there, or a cheap separate domain).
-   Cloudflare Zero Trust → Networks → Tunnels → Create tunnel (cloudflared) → copy the token into `CLOUDFLARE_TUNNEL_TOKEN`. Add a public hostname `hooks.<domain>` → service `http://n8n:5678`, **path `webhook/.*`**, so only the webhooks are public and the n8n editor is not. Put the hostname in `PUBLIC_HOSTNAME`.
+2. **Public HTTPS URL (Cloudflare named tunnel, free).** Meta needs a stable URL, so don't use a quick `trycloudflare.com` tunnel: its address changes on every restart. We use **vasconmaz.com**: add it to a free Cloudflare account and switch its nameservers to Cloudflare at the registrar. The website and email keep working as long as the existing DNS records are imported (Cloudflare does this on setup; check the MX records).
+   Cloudflare Zero Trust → Networks → Tunnels → Create tunnel (cloudflared) → copy the token into `CLOUDFLARE_TUNNEL_TOKEN`. Add a public hostname `hooks.vasconmaz.com` → service `http://n8n:5678`, **path `webhook/.*`**, so only the webhooks are public and the n8n editor is not. Put the hostname in `PUBLIC_HOSTNAME`.
 3. `docker compose up -d`, open http://localhost:5678 on the Mac, create the owner account with a strong password.
 4. n8n → Workflows → Import from file → `workflow.json` → **Activate**.
-5. Check: `curl "https://hooks.<domain>/webhook/meta-comments?hub.mode=subscribe&hub.verify_token=<META_VERIFY_TOKEN>&hub.challenge=ok"` must print `ok`.
+5. Check: `curl "https://hooks.vasconmaz.com/webhook/meta-comments?hub.mode=subscribe&hub.verify_token=<META_VERIFY_TOKEN>&hub.challenge=ok"` must print `ok`.
 6. Fill in the IDs in `.env` (step B below), `docker compose up -d` again, then run a dry test:
    `scripts/simulate-comment.sh construr3 facebook "Cuánto cuesta una cocina?" "María López"`
    About a minute later there should be a `dry_run` row in `n8n-data/logs/autoreply-log.csv` with the exact text that would have been sent.
 
 Tokens live only in `.env` on the Mac (chmod 600), not in n8n credentials. The brief said "n8n credentials", but n8n can't switch credentials per brand inside one HTTP node, and `.env` keeps them out of chat and git just as well.
+
+### WhatsApp alerts (CallMeBot, free)
+
+Each person who should get alerts (Luis, Felix) does this once from their own phone:
+1. Save **+34 644 51 95 23** as a contact (CallMeBot's current number; confirm it on callmebot.com before sending).
+2. Send it the WhatsApp message `I allow callmebot to send me messages`.
+3. It replies with an **apikey**. Add `phone:apikey` to `ALERT_WHATSAPP` in `.env` (country code, digits only, e.g. `50212345678:123456,50287654321:654321`).
+
+CallMeBot is a free third-party service for personal alerts. Alerts only ever contain the comment text and link, never tokens. If it's ever unreliable, the upgrade path is the official WhatsApp Cloud API (needs a separate business phone number).
 
 ## Meta setup (Luis does this part)
 
@@ -47,7 +56,7 @@ B. **Permissions** (Facebook Login flavour, so one Page token covers the Page *a
 
 C. **Tokens:** Business Settings → System users → add an admin system user → assign both Pages (full control) → generate a token with the permissions above. Then get each Page's own token: `GET /me/accounts` with that system-user token. Use those as `CONSTRUR3_PAGE_TOKEN` / `VASCONMAZ_PAGE_TOKEN`. System-user tokens don't expire every 60 days the way a personal login does. Page IDs come from the same call. IG IDs come from `GET /{page-id}?fields=instagram_business_account`.
 
-D. **Webhooks:** in the app → Webhooks: object **Page** → callback `https://hooks.<domain>/webhook/meta-comments`, verify token = `META_VERIFY_TOKEN`, subscribe field `feed`. Object **Instagram** → same URL and token, field `comments`. Then attach the app to each Page: `POST /{page-id}/subscribed_apps?subscribed_fields=feed&access_token=<page token>`.
+D. **Webhooks:** in the app → Webhooks: object **Page** → callback `https://hooks.vasconmaz.com/webhook/meta-comments`, verify token = `META_VERIFY_TOKEN`, subscribe field `feed`. Object **Instagram** → same URL and token, field `comments`. Then attach the app to each Page: `POST /{page-id}/subscribed_apps?subscribed_fields=feed&access_token=<page token>`.
 
 E. **Instagram setting**, on each IG account in the app: Settings → Messages and story replies → Message controls → Connected tools → **Allow access to messages** on. Without it, IG DMs fail.
 
@@ -65,16 +74,20 @@ F. **Business Verification + App Review (Advanced Access)** for the permissions 
 ## Behaviour notes
 
 - **Names:** Facebook gives the commenter's name, so `{nombre}` becomes the first name ("María José López" → "María"). Instagram only gives a @username, and greeting people by handle reads like a bot, so on IG the name is dropped cleanly ("¡Gracias, {nombre}!" → "¡Gracias!"). Tests cover every template both ways.
-- `{saludo}` is available (Buenos días / Buenas tardes / Buenas noches, Guatemala time) but not used yet: see the copy notes below.
+- `{saludo}` gives Buenos días (5–12 h) / Buenas tardes (12–19 h) / Buenas noches, Guatemala time.
 - **Loops:** the brand's own replies come back as comment webhooks. They are recognised by account ID and skipped.
 - **Failed DM** (user blocks messages, comment older than 7 days, etc.): no public reply, because it would promise a message that never arrives. Luis/Felix get an alert to answer by hand.
 - **Dedupe** is kept in n8n's workflow memory for 8 days. Meta retries only when we don't answer 200, and the webhook answers immediately, so duplicates are rare in practice.
 
-## Copy notes for Luis's review (copy in `copy.json` is unchanged from the brief)
+## Copy decisions (2026-11-14)
 
-1. **Vas con Maz DM opens with "Buenas tardes" around the clock.** A comment at 9 a.m. gets "Buenas tardes". Suggestion: replace it with `{saludo}`, which adjusts to the time of day.
+1. **Applied:** the Vas con Maz DM now opens with `{saludo}` (Buenos días / Buenas tardes / Buenas noches by Guatemala time) instead of a fixed "Buenas tardes".
+2. Notes 2–4 below were reviewed and **kept as written** by Luis.
+
+Original review notes:
+
 2. **ConstruR3 public #1 promises "ejemplos de proyectos parecidos a lo que buscas"**, but the DM sends the general portfolio. Suggestion: "…Te enviamos por mensaje ejemplos de nuestros proyectos."
 3. **ConstruR3 public #2 starts "¡Qué bueno que te gustó!"**, and with "any comment" it will also land on questions ("¿precio?") and tags ("@amigo mira"). Suggestion: "¡Gracias por escribirnos, {nombre}!"
 4. **Mixed "we/I" in both DMs:** "Te escribimos… Te comparto… Cuéntame… te ayudamos" (VcM: "Le escribimos… Le comparto"). Pick one voice. Plural ("te compartimos", "cuéntanos") matches the public replies.
 5. **Portfolio links not verified.** I couldn't reach construr3.com or vasconmaz.com from here. Open both `/portafolio/` links before approving. A dead link in the very first DM costs the trust the DM is meant to build.
-6. **Where alerts go** (Slack, Discord, WhatsApp via a bridge, email?) isn't decided. The workflow posts to `ALERT_WEBHOOK_URL`, so anything that accepts a webhook works.
+6. **Alerts:** decided, WhatsApp via CallMeBot (see above).

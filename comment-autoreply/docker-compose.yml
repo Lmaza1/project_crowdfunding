@@ -1,0 +1,29 @@
+# n8n + Cloudflare Tunnel for the Meta comment webhooks, on the Mac Studio.
+# Start:  docker compose up -d        Logs: docker compose logs -f n8n
+# After the first pull, pin both images to the exact versions you got
+# (docker compose images) so an update never changes behaviour silently.
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:stable
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"   # editor only on this Mac; the internet reaches n8n only through the tunnel
+    env_file: .env
+    environment:
+      - GENERIC_TIMEZONE=America/Guatemala
+      - TZ=America/Guatemala
+      - WEBHOOK_URL=https://${PUBLIC_HOSTNAME}/
+      - N8N_PROXY_HOPS=1
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto,fs,path   # Code nodes: HMAC check + CSV log
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false           # Code nodes read ids/tokens from .env
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - LOG_CSV_PATH=/home/node/.n8n/logs/autoreply-log.csv
+      - CLAIM_DIR=/home/node/.n8n/claims
+    volumes:
+      - ./n8n-data:/home/node/.n8n
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on: [n8n]

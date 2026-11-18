@@ -1,0 +1,26 @@
+{
+  "_comment": "Reply copy for the comment auto-reply. Placeholders: {nombre} = commenter's first name (removed cleanly when unknown, e.g. on Instagram), {saludo} = Buenos días / Buenas tardes / Buenas noches by Guatemala time. Nothing is sent to Meta while approved is false: the workflow runs in dry-run and only logs what it would have sent.",
+  "approved": false,
+  "approved_by": null,
+  "approved_on": null,
+  "brands": {
+    "construr3": {
+      "public": [
+        "¡Gracias, {nombre}! Trabajamos remodelaciones de cocinas, baños y ampliaciones en Guatemala. Te enviamos por mensaje ejemplos de proyectos parecidos a lo que buscas.",
+        "¡Qué bueno que te gustó, {nombre}! Si tienes un proyecto en mente, cuéntanos por mensaje qué quieres remodelar y te compartimos fotos reales de nuestro trabajo.",
+        "{nombre}, gracias por comentar. La forma más rápida de cotizar sin compromiso es por mensaje: te pedimos un par de datos y te compartimos nuestro portafolio completo."
+      ],
+      "dm": "¡Hola, {nombre}! Te escribimos de ConstruR3. Gracias por tu comentario. Te comparto nuestro portafolio con proyectos reales para que veas acabados y el tipo de trabajo que hacemos: construr3.com/portafolio/ Cuéntame, ¿qué estás pensando remodelar o construir? Aquí mismo te ayudamos con ideas y un estimado sin compromiso.",
+      "recovery_dm": "Lamentamos tu experiencia, {nombre}. Queremos revisarlo directamente. ¿Nos compartes por aquí qué sucedió?"
+    },
+    "vasconmaz": {
+      "public": [
+        "Gracias por su comentario, {nombre}. En Vas con Maz trabajamos proyectos para empresas e instituciones: oficinas, locales comerciales y espacios corporativos. Le escribimos por mensaje con más información.",
+        "{nombre}, agradecemos su interés. Si su empresa está planeando una remodelación o adecuación de oficinas, por mensaje le compartimos nuestro portafolio de proyectos institucionales.",
+        "Gracias, {nombre}. Atendemos proyectos comerciales e institucionales en Guatemala. Le escribimos por mensaje para conocer los detalles de su proyecto."
+      ],
+      "dm": "{saludo}, {nombre}. Le escribimos de Vas con Maz, S.A. Gracias por su comentario. Le comparto nuestro portafolio de proyectos para empresas e instituciones: vasconmaz.com/portafolio/ ¿Qué tipo de espacio están buscando remodelar o construir? Por este medio le atendemos con gusto y le preparamos una propuesta sin compromiso.",
+      "recovery_dm": "Lamentamos su experiencia, {nombre}. Queremos revisarlo directamente. ¿Nos comparte por aquí qué sucedió?"
+    }
+  }
+}

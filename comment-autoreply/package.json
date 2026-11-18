@@ -1,0 +1,10 @@
+{
+  "name": "comment-autoreply",
+  "private": true,
+  "description": "Meta comment auto-reply (n8n) for ConstruR3 and Vas con Maz",
+  "scripts": {
+    "build": "node scripts/build-workflow.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=18" }
+}
